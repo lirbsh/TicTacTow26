@@ -1,0 +1,62 @@
+﻿using Plugin.CloudFirestore;
+using Plugin.CloudFirestore.Attributes;
+using TicTacTow25.Interfaces;
+using TicTacTow25.ModelsLogic;
+
+namespace TicTacTow25.Models
+{
+    public abstract class GameModel
+    {
+        protected User? user = IPlatformApplication.Current?.Services.GetService<IUser>() as User;
+        protected enum Actions { Changed, Deleted }
+        protected Actions action = Actions.Changed;
+        protected FbData? fbd = IPlatformApplication.Current?.Services.GetService<IFbData>() as FbData;
+        protected IListenerRegistration? ilr;
+        protected GameStatus _status = new();
+        protected string[,]? gameBoard;
+        protected string nextPlay = Strings.X;
+        protected TimerSettings timerSettings = new(Keys.TotalTurnTime, Keys.TurnTimeInterval);
+        protected abstract void UpdateStatus();
+        protected abstract void UpdateFbMove();
+        protected abstract void UpdateFbJoinGame(Action<Task> OnComplete);
+        protected abstract void OnComplete(Task task);
+        protected abstract void OnChange(IDocumentSnapshot? snapshot, Exception? error);
+        [Ignored]
+        public EventHandler? TimeLeftChanged;
+        [Ignored]
+        public EventHandler<DisplayMoveArgs>? DisplayChanged;
+        [Ignored]
+        public EventHandler? GameChanged;
+        [Ignored]
+        public EventHandler? GameDeleted;
+        [Ignored]
+        public string StatusMessage => _status.StatusMessage;
+        [Ignored]
+        public string Id { get; set; } = string.Empty;
+        [Ignored]
+        public abstract string OpponentName { get; }
+        [Ignored]
+        public string? MyName { get; set; } 
+        [Ignored]
+        public string RowSizeName => $"{RowSize} X {RowSize}";
+        [Ignored]
+        public bool IsHostUser { get; set; }
+        [Ignored]
+        public string TimeLeft { get; protected set; } = string.Empty;
+
+        public string HostName { get; set; } = string.Empty;
+        public string GuestName { get; set; } = string.Empty;
+        public DateTime Created { get; set; }
+        public int RowSize {  get; set; }
+        public bool IsFull { get; set; }
+        public bool IsHostTurn { get; set; } = false;
+        public List<int> Move { get; set; } = [Keys.NoMove,Keys.NoMove];
+        public abstract void SetDocument(Action<System.Threading.Tasks.Task> OnComplete);
+        public abstract void RemoveSnapshotListener();
+        public abstract void AddSnapshotListener();
+        public abstract void DeleteDocument(Action<System.Threading.Tasks.Task> OnComplete);
+        public abstract void UpdateGuestUser(Action<Task> OnComplete);
+        public abstract void Play(int rowIndex, int columnIndex, bool MyMove);
+        public abstract void InitBoardAndStatus();
+    }
+}

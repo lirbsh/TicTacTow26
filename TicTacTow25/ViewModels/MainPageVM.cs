@@ -1,0 +1,69 @@
+﻿using System.Collections.ObjectModel;
+using System.Windows.Input;
+using TicTacTow25.Models;
+using TicTacTow25.ModelsLogic;
+using TicTacTow25.Views;
+
+namespace TicTacTow25.ViewModels
+{
+    public partial class MainPageVM:ObservableObject
+    {
+        private readonly Games games = new();
+        public ICommand AddGameCommand { get; } 
+        public bool IsBusy => games.IsBusy;
+        public  ObservableCollection<GameSize>? GameSizes { get => games.GameSizes; set => games.GameSizes = value; }
+        public GameSize SelectedGameSize { get => games.SelectedGameSize; set => games.SelectedGameSize = value; }
+        public ObservableCollection<Game>? GamesList => games.GamesList;
+        public Game? SelectedItem 
+        {
+            get => games.CurrentGame;
+
+            set
+            {
+                if (value != null)
+                {
+                    games.CurrentGame = value;
+                    MainThread.InvokeOnMainThreadAsync(() =>
+                    {
+                        Shell.Current.Navigation.PushAsync(new GamePage(value), true);
+                    });
+                }
+            }
+        }
+        public MainPageVM()
+        {
+            AddGameCommand = new Command(AddGame);
+            games.OnGameAdded += OnGameAdded;
+            games.OnGamesChanged += OnGamesChanged;
+        }
+        private void AddGame()
+        {
+            if (!IsBusy)
+            {
+                games.AddGame();
+                OnPropertyChanged(nameof(IsBusy));
+            }
+        }
+        private void OnGamesChanged(object? sender, EventArgs e)
+        {
+            OnPropertyChanged(nameof(GamesList));
+        }
+
+        private void OnGameAdded(object? sender,Game game)
+        {
+            OnPropertyChanged(nameof(IsBusy));
+            MainThread.InvokeOnMainThreadAsync(() =>
+            {
+                Shell.Current.Navigation.PushAsync(new GamePage(game), true);
+            });
+        }
+        public void AddSnapshotListener()
+        {
+            games.AddSnapshotListener();
+        }
+        public void RemoveSnapshotListener()
+        {
+            games.RemoveSnapshotListener();
+        }
+    }
+}

@@ -1,0 +1,521 @@
+using Plugin.CloudFirestore;
+using System.Text.RegularExpressions;
+using TicTacTow25.Interfaces;
+using TicTacTow25.Models;
+#if !ANDROID
+using Plugin.CloudFirestore.Attributes;
+using System.Collections;
+using System.Globalization;
+using System.Net;
+using System.Net.Http.Headers;
+using System.Reflection;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+#endif
+
+namespace TicTacTow25.ModelsLogic
+{
+    // On Android the original Plugin.CloudFirestore native implementation is used
+    // (real Firestore SDK with realtime listeners). On Windows, iOS and Mac Catalyst
+    // the plugin ships only a stub, so there Firestore is accessed through the
+    // Firestore REST API and snapshot listeners are emulated by polling.
+    // Plugin.CloudFirestore's shared types (IQuerySnapshot, IDocumentSnapshot,
+    // IListenerRegistration, handler delegates, [Ignored]) are used on all platforms,
+    // so the rest of the app is unchanged.
+    public partial class FbData : FbDataModel, IFbData
+    {
+        public override async void CreateUserWithEmailAndPasswordAsync(string email, string password, string name, Action<System.Threading.Tasks.Task> OnComplete)
+        {
+            await facl.CreateUserWithEmailAndPasswordAsync(email, password, name).ContinueWith(OnComplete);
+        }
+        public override async void SignInWithEmailAndPasswordAsync(string email, string password, Action<System.Threading.Tasks.Task> OnComplete)
+        {
+            await facl.SignInWithEmailAndPasswordAsync(email, password).ContinueWith(OnComplete);
+        }
+        public override string GetErrorMessage(string errMessage)
+        {
+            string retMessage;
+            int end, start = errMessage.IndexOf(Keys.MessageKey);
+            if (start > 0)
+            {
+                end = errMessage.IndexOf(Keys.ErrorsKey, start);
+
+                string title = errMessage[(start + Keys.MessageKey.Length)..end]
+                    .Replace(Keys.Apostrophe, string.Empty)
+                    .Replace(Keys.Colon, string.Empty)
+                    .Replace(Keys.Comma, string.Empty)
+                    .Trim();
+                title = string.Join(Keys.WordsDelimiter, title.Split(Keys.TitleDelimiter));
+                errMessage = errMessage[(errMessage.IndexOf(Keys.ReasonKey) +
+                    Keys.ReasonKey.Length)..];
+                errMessage = string.Join(Keys.WordsDelimiter,
+                    Regex.Split(errMessage, Keys.UpperCaseDelimiter)).Trim();
+                retMessage = title + Keys.NewLine + Keys.ReasonKey +
+                Keys.WordsDelimiter + errMessage[..^1];
+            }
+            else
+                retMessage = errMessage;
+            return retMessage;
+        }
+
+#if ANDROID
+        //--- native Plugin.CloudFirestore implementation (unchanged behavior) ---------
+
+        private readonly IFirestore fs = CrossCloudFirestore.Current.Instance;
+        private IWriteBatch? batch;
+
+        public override string SetDocument(object obj, string collectonName, string id, Action<System.Threading.Tasks.Task> OnComplete)
+        {
+            IDocumentReference dr = string.IsNullOrEmpty(id) ? fs.Collection(collectonName).Document() : fs.Collection(collectonName).Document(id);
+            dr.SetAsync(obj).ContinueWith(OnComplete);
+            return dr.Id;
+        }
+        public override IListenerRegistration AddSnapshotListener(string collectonName, Plugin.CloudFirestore.QuerySnapshotHandler OnChange)
+        {
+            ICollectionReference cr = fs.Collection(collectonName);
+            return cr.AddSnapshotListener(OnChange);
+        }
+        public override IListenerRegistration AddSnapshotListener(string collectonName, string id, Plugin.CloudFirestore.DocumentSnapshotHandler OnChange)
+        {
+            IDocumentReference cr = fs.Collection(collectonName).Document(id);
+            return cr.AddSnapshotListener(OnChange);
+        }
+        public override async void GetDocumentsWhereEqualTo(string collectonName, string fName, object fValue, Action<IQuerySnapshot> OnComplete)
+        {
+            ICollectionReference cr = fs.Collection(collectonName);
+            IQuerySnapshot qs = await cr.WhereEqualsTo(fName, fValue).GetAsync();
+            OnComplete(qs);
+        }
+        public override async void GetDocumentsWhereLessThan(string collectonName, string fName, object fValue, Action<IQuerySnapshot> OnComplete)
+        {
+            ICollectionReference cr = fs.Collection(collectonName);
+            IQuerySnapshot qs = await cr.WhereLessThan(fName, fValue).GetAsync();
+            OnComplete(qs);
+        }
+        public override async void UpdateFields(string collectonName, string id, Dictionary<string, object> dict, Action<Task> OnComplete)
+        {
+            IDocumentReference dr = fs.Collection(collectonName).Document(id);
+            await dr.UpdateAsync(dict).ContinueWith(OnComplete);
+        }
+        public override async void DeleteDocument(string collectonName, string id, Action<Task> OnComplete)
+        {
+            IDocumentReference dr = fs.Collection(collectonName).Document(id);
+            await dr.DeleteAsync().ContinueWith(OnComplete);
+        }
+        public override async void UpdateField(string collectonName, string id, string fieldName, object fieldValue, Action<Task> OnComplete)
+        {
+            IDocumentReference dr = fs.Collection(collectonName).Document(id);
+            await dr.UpdateAsync(fieldName, fieldValue).ContinueWith(OnComplete);
+        }
+        public override void StartBatch()
+        {
+            batch = fs.Batch();
+        }
+        public override void BatchUpdateField(string collectonName, string id, string fName, object fValue)
+        {
+            IDocumentReference dr = fs.Collection(collectonName).Document(id);
+            batch?.Update(dr, fName, fValue);
+        }
+        public override void BatchIncrementField(string collectonName, string id, string fName, long incrementBy)
+        {
+            IDocumentReference dr = fs.Collection(collectonName).Document(id);
+            batch?.Update(dr, fName, FieldValue.Increment(incrementBy));
+        }
+        public override void CommitBatch(Action<System.Threading.Tasks.Task> OnComplete)
+        {
+            batch?.CommitAsync().ContinueWith(OnComplete);
+        }
+#else
+        //--- Firestore REST implementation (Windows, iOS, Mac Catalyst) ---------------
+
+        private const int PollIntervalMs = 2000;
+        private const int QueryLimit = 300;
+        private const int AutoIdLength = 20;
+        private const string AutoIdChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        private static readonly string ProjectId = Keys.FbAppDomailKey.Split('.')[0];
+        private static readonly string BaseName = $"projects/{ProjectId}/databases/(default)/documents";
+        private static readonly string BaseUrl = $"https://firestore.googleapis.com/v1/{BaseName}";
+        private static readonly HttpClient http = new();
+        private List<JsonObject>? writes;
+
+        public override string SetDocument(object obj, string collectonName, string id, Action<System.Threading.Tasks.Task> OnComplete)
+        {
+            string docId = string.IsNullOrEmpty(id) ? NewAutoId() : id;
+            JsonObject body = new() { ["fields"] = SerializeFields(obj) };
+            SendCheckedAsync(HttpMethod.Patch, DocUrl(collectonName, docId), body).ContinueWith(OnComplete);
+            return docId;
+        }
+        public override void UpdateFields(string collectonName, string id, Dictionary<string, object> dict, Action<Task> OnComplete)
+        {
+            StringBuilder url = new StringBuilder(DocUrl(collectonName, id)).Append("&currentDocument.exists=true");
+            JsonObject fields = [];
+            foreach (KeyValuePair<string, object> kvp in dict)
+            {
+                url.Append("&updateMask.fieldPaths=").Append(Uri.EscapeDataString(kvp.Key));
+                fields[kvp.Key] = ToValue(kvp.Value);
+            }
+            SendCheckedAsync(HttpMethod.Patch, url.ToString(), new JsonObject { ["fields"] = fields }).ContinueWith(OnComplete);
+        }
+        public override void UpdateField(string collectonName, string id, string fieldName, object fieldValue, Action<Task> OnComplete)
+        {
+            UpdateFields(collectonName, id, new Dictionary<string, object> { { fieldName, fieldValue } }, OnComplete);
+        }
+        public override void DeleteDocument(string collectonName, string id, Action<Task> OnComplete)
+        {
+            SendCheckedAsync(HttpMethod.Delete, DocUrl(collectonName, id)).ContinueWith(OnComplete);
+        }
+        public override async void GetDocumentsWhereEqualTo(string collectonName, string fName, object fValue, Action<IQuerySnapshot> OnComplete)
+        {
+            try { OnComplete(await RunQueryAsync(collectonName, fName, "EQUAL", fValue)); }
+            catch { /* transient network failure – keep the current list */ }
+        }
+        public override async void GetDocumentsWhereLessThan(string collectonName, string fName, object fValue, Action<IQuerySnapshot> OnComplete)
+        {
+            try { OnComplete(await RunQueryAsync(collectonName, fName, "LESS_THAN", fValue)); }
+            catch { /* transient network failure – keep the current list */ }
+        }
+        public override IListenerRegistration AddSnapshotListener(string collectonName, Plugin.CloudFirestore.QuerySnapshotHandler OnChange)
+        {
+            PollListener listener = new();
+            _ = Task.Run(() => PollCollectionAsync(collectonName, OnChange, listener));
+            return listener;
+        }
+        public override IListenerRegistration AddSnapshotListener(string collectonName, string id, Plugin.CloudFirestore.DocumentSnapshotHandler OnChange)
+        {
+            PollListener listener = new();
+            _ = Task.Run(() => PollDocumentAsync(collectonName, id, OnChange, listener));
+            return listener;
+        }
+        public override void StartBatch()
+        {
+            writes = [];
+        }
+        public override void BatchUpdateField(string collectonName, string id, string fName, object fValue)
+        {
+            writes?.Add(new JsonObject
+            {
+                ["update"] = new JsonObject
+                {
+                    ["name"] = $"{BaseName}/{collectonName}/{id}",
+                    ["fields"] = new JsonObject { [fName] = ToValue(fValue) }
+                },
+                ["updateMask"] = new JsonObject { ["fieldPaths"] = new JsonArray(fName) },
+                ["currentDocument"] = new JsonObject { ["exists"] = true }
+            });
+        }
+        public override void BatchIncrementField(string collectonName, string id, string fName, long incrementBy)
+        {
+            writes?.Add(new JsonObject
+            {
+                ["transform"] = new JsonObject
+                {
+                    ["document"] = $"{BaseName}/{collectonName}/{id}",
+                    ["fieldTransforms"] = new JsonArray(new JsonObject
+                    {
+                        ["fieldPath"] = fName,
+                        ["increment"] = new JsonObject { ["integerValue"] = incrementBy.ToString(CultureInfo.InvariantCulture) }
+                    })
+                }
+            });
+        }
+        public override void CommitBatch(Action<System.Threading.Tasks.Task> OnComplete)
+        {
+            JsonObject body = new() { ["writes"] = new JsonArray([.. writes ?? []]) };
+            writes = null;
+            SendCheckedAsync(HttpMethod.Post, $"{BaseUrl}:commit?key={Keys.FbApiKey}", body).ContinueWith(OnComplete);
+        }
+
+        //--- REST plumbing ------------------------------------------------------------
+
+        private static string DocUrl(string collection, string id) => $"{BaseUrl}/{collection}/{id}?key={Keys.FbApiKey}";
+        private static string NewAutoId()
+        {
+            StringBuilder sb = new(AutoIdLength);
+            for (int i = 0; i < AutoIdLength; i++)
+                sb.Append(AutoIdChars[Random.Shared.Next(AutoIdChars.Length)]);
+            return sb.ToString();
+        }
+        private async Task<AuthenticationHeaderValue?> GetAuthHeaderAsync()
+        {
+            try
+            {
+                if (facl?.User != null)
+                    return new AuthenticationHeaderValue("Bearer", await facl.User.GetIdTokenAsync());
+            }
+            catch { /* not signed in – rely on Firestore rules for anonymous access */ }
+            return null;
+        }
+        private async Task<HttpResponseMessage> SendAsync(HttpMethod method, string url, JsonObject? body = null)
+        {
+            HttpRequestMessage req = new(method, url);
+            req.Headers.Authorization = await GetAuthHeaderAsync();
+            if (body != null)
+                req.Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json");
+            return await http.SendAsync(req);
+        }
+        private async Task SendCheckedAsync(HttpMethod method, string url, JsonObject? body = null)
+        {
+            HttpResponseMessage resp = await SendAsync(method, url, body);
+            resp.EnsureSuccessStatusCode();
+        }
+        private async Task<RestDocumentSnapshot> GetDocumentAsync(string collection, string id)
+        {
+            HttpResponseMessage resp = await SendAsync(HttpMethod.Get, DocUrl(collection, id));
+            if (resp.StatusCode == HttpStatusCode.NotFound)
+                return new RestDocumentSnapshot(id, null);
+            resp.EnsureSuccessStatusCode();
+            JsonObject? doc = JsonNode.Parse(await resp.Content.ReadAsStringAsync()) as JsonObject;
+            return new RestDocumentSnapshot(id, doc?["fields"] as JsonObject ?? []);
+        }
+        private async Task<List<IDocumentSnapshot>> ListDocumentsAsync(string collection)
+        {
+            HttpResponseMessage resp = await SendAsync(HttpMethod.Get, $"{BaseUrl}/{collection}?pageSize={QueryLimit}&key={Keys.FbApiKey}");
+            resp.EnsureSuccessStatusCode();
+            List<IDocumentSnapshot> docs = [];
+            if (JsonNode.Parse(await resp.Content.ReadAsStringAsync()) is JsonObject result && result["documents"] is JsonArray documents)
+                foreach (JsonNode? entry in documents)
+                    if (entry is JsonObject d && d["name"] is JsonNode name)
+                        docs.Add(new RestDocumentSnapshot(IdFromName(name.GetValue<string>()), d["fields"] as JsonObject ?? []));
+            return docs;
+        }
+        private async Task<RestQuerySnapshot> RunQueryAsync(string collection, string fieldName, string op, object value)
+        {
+            JsonObject body = new()
+            {
+                ["structuredQuery"] = new JsonObject
+                {
+                    ["from"] = new JsonArray(new JsonObject { ["collectionId"] = collection }),
+                    ["where"] = new JsonObject
+                    {
+                        ["fieldFilter"] = new JsonObject
+                        {
+                            ["field"] = new JsonObject { ["fieldPath"] = fieldName },
+                            ["op"] = op,
+                            ["value"] = ToValue(value)
+                        }
+                    },
+                    ["limit"] = QueryLimit
+                }
+            };
+            HttpResponseMessage resp = await SendAsync(HttpMethod.Post, $"{BaseUrl}:runQuery?key={Keys.FbApiKey}", body);
+            resp.EnsureSuccessStatusCode();
+            List<IDocumentSnapshot> docs = [];
+            if (JsonNode.Parse(await resp.Content.ReadAsStringAsync()) is JsonArray results)
+                foreach (JsonNode? entry in results)
+                    if (entry?["document"] is JsonObject d && d["name"] is JsonNode name)
+                        docs.Add(new RestDocumentSnapshot(IdFromName(name.GetValue<string>()), d["fields"] as JsonObject ?? []));
+            return new RestQuerySnapshot(docs);
+        }
+        private static string IdFromName(string name) => name[(name.LastIndexOf('/') + 1)..];
+
+        //--- polling listeners (REST has no realtime channel) -------------------------
+
+        private async Task PollCollectionAsync(string collection, Plugin.CloudFirestore.QuerySnapshotHandler OnChange, PollListener listener)
+        {
+            string? lastPayload = null;
+            while (!listener.Token.IsCancellationRequested)
+            {
+                try
+                {
+                    List<IDocumentSnapshot> docs = await ListDocumentsAsync(collection);
+                    string payload = string.Join("|", docs.Select(d => d.Id + ":" + ((RestDocumentSnapshot)d).Payload));
+                    if (payload != lastPayload)
+                    {
+                        lastPayload = payload;
+                        RestQuerySnapshot qs = new(docs);
+                        MainThread.BeginInvokeOnMainThread(() => OnChange(qs, null!));
+                    }
+                }
+                catch { /* transient network failure – retry on next poll */ }
+                try { await Task.Delay(PollIntervalMs, listener.Token); }
+                catch (OperationCanceledException) { }
+            }
+        }
+        private async Task PollDocumentAsync(string collection, string id, Plugin.CloudFirestore.DocumentSnapshotHandler OnChange, PollListener listener)
+        {
+            string? lastPayload = null;
+            bool first = true;
+            while (!listener.Token.IsCancellationRequested)
+            {
+                try
+                {
+                    RestDocumentSnapshot ds = await GetDocumentAsync(collection, id);
+                    string payload = ds.Exists ? ds.Payload : string.Empty;
+                    if (first || payload != lastPayload)
+                    {
+                        first = false;
+                        lastPayload = payload;
+                        MainThread.BeginInvokeOnMainThread(() => OnChange(ds.Exists ? ds : null!, null!));
+                    }
+                }
+                catch { /* transient network failure – retry on next poll */ }
+                try { await Task.Delay(PollIntervalMs, listener.Token); }
+                catch (OperationCanceledException) { }
+            }
+        }
+        private sealed class PollListener : IListenerRegistration
+        {
+            private readonly CancellationTokenSource cts = new();
+            public CancellationToken Token => cts.Token;
+            public void Remove() => cts.Cancel();
+            public void Dispose() => cts.Cancel();
+        }
+
+        //--- object <-> Firestore REST value mapping ----------------------------------
+
+        private static JsonObject SerializeFields(object obj)
+        {
+            JsonObject fields = [];
+            foreach (PropertyInfo p in obj.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance))
+                if (p.CanRead && p.CanWrite && p.GetIndexParameters().Length == 0 && p.GetCustomAttribute<IgnoredAttribute>() == null)
+                    fields[p.Name] = ToValue(p.GetValue(obj));
+            return fields;
+        }
+        private static JsonObject ToValue(object? v)
+        {
+            return v switch
+            {
+                null => new JsonObject { ["nullValue"] = null },
+                string s => new JsonObject { ["stringValue"] = s },
+                bool b => new JsonObject { ["booleanValue"] = b },
+                int or long or short or byte => new JsonObject { ["integerValue"] = Convert.ToInt64(v).ToString(CultureInfo.InvariantCulture) },
+                double or float or decimal => new JsonObject { ["doubleValue"] = Convert.ToDouble(v) },
+                DateTime dt => new JsonObject { ["timestampValue"] = dt.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture) },
+                IEnumerable list => new JsonObject { ["arrayValue"] = new JsonObject { ["values"] = ToArray(list) } },
+                _ => new JsonObject { ["mapValue"] = new JsonObject { ["fields"] = SerializeFields(v) } }
+            };
+        }
+        private static JsonArray ToArray(IEnumerable list)
+        {
+            JsonArray arr = [];
+            foreach (object? item in list)
+                arr.Add(ToValue(item));
+            return arr;
+        }
+        private static object? DeserializeObject(Type type, JsonObject? fields)
+        {
+            if (fields == null)
+                return null;
+            object? obj = Activator.CreateInstance(type);
+            if (obj == null)
+                return null;
+            foreach (PropertyInfo p in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+                if (p.CanWrite && p.GetIndexParameters().Length == 0 && fields[p.Name] is JsonObject value)
+                {
+                    object? converted = FromValue(p.PropertyType, value);
+                    if (converted != null || !p.PropertyType.IsValueType || Nullable.GetUnderlyingType(p.PropertyType) != null)
+                        p.SetValue(obj, converted);
+                }
+            return obj;
+        }
+        private static object? FromValue(Type type, JsonObject value)
+        {
+            if (value.ContainsKey("nullValue"))
+                return null;
+            if (type == typeof(string))
+                return value["stringValue"]?.GetValue<string>();
+            if (type == typeof(bool))
+                return value["booleanValue"]?.GetValue<bool>() ?? false;
+            if (type == typeof(int) || type == typeof(long))
+            {
+                long l = value["integerValue"] is JsonNode n ? ParseInteger(n)
+                    : (long)(value["doubleValue"]?.GetValue<double>() ?? 0);
+                return type == typeof(int) ? (int)l : l;
+            }
+            if (type == typeof(double))
+                return value["doubleValue"]?.GetValue<double>() ?? (value["integerValue"] is JsonNode i ? (double)ParseInteger(i) : 0d);
+            if (type == typeof(DateTime))
+                return value["timestampValue"] is JsonNode t
+                    ? DateTime.Parse(t.GetValue<string>(), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind).ToLocalTime()
+                    : DateTime.MinValue;
+            if (typeof(IList).IsAssignableFrom(type) && type.IsGenericType)
+            {
+                Type elemType = type.GetGenericArguments()[0];
+                IList list = (IList)Activator.CreateInstance(type)!;
+                if (value["arrayValue"]?["values"] is JsonArray arr)
+                    foreach (JsonNode? item in arr)
+                        if (item is JsonObject io)
+                            list.Add(FromValue(elemType, io));
+                return list;
+            }
+            if (value["mapValue"]?["fields"] is JsonObject map)
+                return DeserializeObject(type, map);
+            return null;
+        }
+        private static long ParseInteger(JsonNode n) =>
+            n.GetValueKind() == JsonValueKind.String ? long.Parse(n.GetValue<string>(), CultureInfo.InvariantCulture) : n.GetValue<long>();
+        private static object? FromValueUntyped(JsonObject value)
+        {
+            if (value.ContainsKey("nullValue"))
+                return null;
+            if (value["stringValue"] is JsonNode s)
+                return s.GetValue<string>();
+            if (value["booleanValue"] is JsonNode b)
+                return b.GetValue<bool>();
+            if (value["integerValue"] is JsonNode i)
+                return ParseInteger(i);
+            if (value["doubleValue"] is JsonNode d)
+                return d.GetValue<double>();
+            if (value["timestampValue"] is JsonNode t)
+                return DateTime.Parse(t.GetValue<string>(), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind).ToLocalTime();
+            if (value["arrayValue"]?["values"] is JsonArray arr)
+                return arr.OfType<JsonObject>().Select(FromValueUntyped).ToList();
+            if (value["mapValue"]?["fields"] is JsonObject map)
+            {
+                Dictionary<string, object?> m = [];
+                foreach (KeyValuePair<string, JsonNode?> kvp in map)
+                    if (kvp.Value is JsonObject vo)
+                        m[kvp.Key] = FromValueUntyped(vo);
+                return m;
+            }
+            return null;
+        }
+
+        //--- Plugin.CloudFirestore snapshot contracts backed by REST results ----------
+
+        private sealed class RestDocumentSnapshot(string id, JsonObject? fields) : IDocumentSnapshot
+        {
+            private readonly JsonObject? fields = fields;
+            public string Id { get; } = id;
+            public bool Exists => fields != null;
+            internal string Payload => fields?.ToJsonString() ?? string.Empty;
+            public IDictionary<string, object?>? Data
+            {
+                get
+                {
+                    if (fields == null)
+                        return null;
+                    Dictionary<string, object?> d = [];
+                    foreach (KeyValuePair<string, JsonNode?> kvp in fields)
+                        if (kvp.Value is JsonObject vo)
+                            d[kvp.Key] = FromValueUntyped(vo);
+                    return d;
+                }
+            }
+            public ISnapshotMetadata Metadata => throw new NotSupportedException();
+            public IDocumentReference Reference => throw new NotSupportedException();
+            public IDictionary<string, object?>? GetData(ServerTimestampBehavior serverTimestampBehavior) => Data;
+            public T ToObject<T>() => fields == null ? default! : (T)DeserializeObject(typeof(T), fields)!;
+            public T ToObject<T>(ServerTimestampBehavior serverTimestampBehavior) => ToObject<T>();
+            public T Get<T>(string field) => fields?[field] is JsonObject v ? (T)FromValue(typeof(T), v)! : default!;
+            public T Get<T>(string field, ServerTimestampBehavior serverTimestampBehavior) => Get<T>(field);
+            public T Get<T>(FieldPath field) => throw new NotSupportedException();
+            public T Get<T>(FieldPath field, ServerTimestampBehavior serverTimestampBehavior) => throw new NotSupportedException();
+        }
+        private sealed class RestQuerySnapshot(List<IDocumentSnapshot> docs) : IQuerySnapshot
+        {
+            private readonly List<IDocumentSnapshot> docs = docs;
+            public int Count => docs.Count;
+            public bool IsEmpty => docs.Count == 0;
+            public IEnumerable<IDocumentSnapshot> Documents => docs;
+            public IEnumerable<IDocumentChange> DocumentChanges => throw new NotSupportedException();
+            public ISnapshotMetadata Metadata => throw new NotSupportedException();
+            public IQuery Query => throw new NotSupportedException();
+            public IEnumerable<IDocumentChange> GetDocumentChanges(bool includeMetadataChanges) => throw new NotSupportedException();
+            public IEnumerable<T> ToObjects<T>() => docs.Select(d => d.ToObject<T>()).Where(o => o != null)!;
+            public IEnumerable<T> ToObjects<T>(ServerTimestampBehavior serverTimestampBehavior) => ToObjects<T>();
+        }
+#endif
+    }
+}

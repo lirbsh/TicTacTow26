@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<Shell
+   x:Class="TicTacTow25.AppShell"
+xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+xmlns:local="clr-namespace:TicTacTow25"
+xmlns:views="clr-namespace:TicTacTow25.Views"
+Title="TicTacTow25"
+Shell.FlyoutBehavior="Disabled">
+    <TabBar>
+        <ShellContent
+        Title="XO"
+        ContentTemplate="{DataTemplate local:MainPage}"
+        Route="MainPage" />
+        <ShellContent
+        Title="MP"
+        ContentTemplate="{DataTemplate views:MPGamesPage}"
+        Route="MPGamesPage" />
+    </TabBar>
+
+</Shell>

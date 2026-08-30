@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage
+    x:Class="TicTacTow25.Views.MPGamePage"
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    xmlns:m="clr-namespace:TicTacTow25.Models"
+    xmlns:vm="clr-namespace:TicTacTow25.ViewModels"
+    Title="MPGamePage"
+    x:DataType="vm:MPGamePageVM">
+    <VerticalStackLayout>
+        <Grid x:Name="grdOponnents" />
+        <Grid
+            x:Name="grdBoard"
+            ColumnSpacing="1"
+            HorizontalOptions="Center"
+            RowSpacing="1" />
+
+        <Label HorizontalOptions="Center" Text="{Binding Message}" />
+        <BoxView BackgroundColor="Blue" HeightRequest="1" />
+        <Entry
+            HorizontalOptions="Center"
+            Placeholder="{x:Static m:Strings.MessageToSend}"
+            Text="{Binding MyMessage}" />
+        <Button
+            Command="{Binding SendMessageCommand}"
+            FontSize="12"
+            HeightRequest="35"
+            HorizontalOptions="Center"
+            Text="{x:Static m:Strings.SendMessage}" />
+        <Label
+            Margin="1"
+            Padding="1"
+            BackgroundColor="{Binding IsMyTurn, Converter={StaticResource boolToColorConvert}}"
+            FontSize="14"
+            HorizontalOptions="Center"
+            Text="{Binding MyName}"
+            VerticalOptions="Center"
+            VerticalTextAlignment="Center" />
+    </VerticalStackLayout>
+</ContentPage>
