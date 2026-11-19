@@ -361,3 +361,5 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+/TicTacTow25/Models/Keys.cs
+/TicTacTow25/Resources/Raw/google-services.json
