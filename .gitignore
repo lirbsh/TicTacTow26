@@ -363,3 +363,5 @@ MigrationBackup/
 FodyWeavers.xsd
 /TicTacTow25/Models/Keys.cs
 /TicTacTow25/Resources/Raw/google-services.json
+/TicTacTow25/Models/Keys.cs
+/json.txt
